@@ -4,7 +4,7 @@ import time
 import argparse
 import os
 import sys
-from hailo_whisper_pipeline import HailoWhisperPipeline
+from app.hailo_whisper_pipeline import HailoWhisperPipeline
 from common.audio_utils import load_audio
 from common.preprocessing import preprocess, improve_input_audio
 from common.postprocessing import clean_transcription
