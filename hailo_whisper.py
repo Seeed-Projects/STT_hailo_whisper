@@ -1,136 +1,358 @@
-"""Main app for Hailo Whisper"""
+"""Real-time STT with Hailo Whisper - Fixed Version
+
+Fixed audio buffer size and method calls.
+"""
 
 import time
 import argparse
+import threading
+import queue
+import numpy as np
 import os
-import sys
+from collections import deque
 from app.hailo_whisper_pipeline import HailoWhisperPipeline
-from common.audio_utils import load_audio
-from common.preprocessing import preprocess, improve_input_audio
+from common.preprocessing import preprocess
 from common.postprocessing import clean_transcription
-from common.record_utils import record_audio
 from app.whisper_hef_registry import HEF_REGISTRY
 
+# Try to import sounddevice, fallback to pyaudio if not available
+try:
+    import sounddevice as sd
+    AUDIO_BACKEND = "sounddevice"
+except ImportError:
+    try:
+        import pyaudio
+        AUDIO_BACKEND = "pyaudio"
+    except ImportError:
+        print("Error: No audio backend available. Please install either 'sounddevice' or 'pyaudio'")
+        print("Install sounddevice: uv pip install sounddevice")
+        print("Or install pyaudio: uv pip install pyaudio")
+        exit(1)
 
-DURATION = 5  # recording duration in seconds
+# Real-time configuration
+CHUNK_SIZE = 1600  # 100ms chunks at 16kHz
+SAMPLE_RATE = 16000
+CHANNELS = 1
+
+# Model processing configuration - 使用5秒块来匹配模型期望
+PROCESS_CHUNK_DURATION = 5.0  # 改为5秒以匹配模型输入
+OVERLAP_DURATION = 1.0  # 增加重叠以确保连续性
+SILENCE_THRESHOLD = 500
+
+
+class AudioStream:
+    """Audio stream with multiple backend support"""
+    
+    def __init__(self, sample_rate=SAMPLE_RATE, chunk_size=CHUNK_SIZE):
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        # 增加缓冲区大小以容纳5秒音频
+        buffer_seconds = 15  # 15秒缓冲区
+        self.audio_buffer = deque(maxlen=int(sample_rate * buffer_seconds))
+        self.processing_buffer = deque()
+        self.audio_queue = queue.Queue()
+        self.is_recording = False
+        self.backend = AUDIO_BACKEND
+        
+        if self.backend == "sounddevice":
+            self._init_sounddevice()
+        else:
+            self._init_pyaudio()
+            
+    def _init_sounddevice(self):
+        """Initialize sounddevice backend"""
+        self.stream = None
+        print("Using sounddevice audio backend")
+        
+    def _init_pyaudio(self):
+        """Initialize pyaudio backend"""
+        self.audio_interface = pyaudio.PyAudio()
+        self.stream = None
+        print("Using pyaudio audio backend")
+        
+    def start_stream(self):
+        """Start audio streaming"""
+        self.is_recording = True
+        
+        if self.backend == "sounddevice":
+            def audio_callback(indata, frames, time, status):
+                if status:
+                    print(f"Audio stream status: {status}")
+                if self.is_recording:
+                    # Convert to float32 and normalize
+                    audio_chunk = indata[:, 0].astype(np.float32)
+                    self.audio_buffer.extend(audio_chunk)
+                    
+                    # Check if we have enough data for processing (5 seconds)
+                    if len(self.audio_buffer) >= int(self.sample_rate * PROCESS_CHUNK_DURATION):
+                        self._process_audio_chunk()
+            
+            self.stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=CHANNELS,
+                dtype=np.float32,
+                blocksize=self.chunk_size,
+                callback=audio_callback
+            )
+            self.stream.start()
+            
+        else:  # pyaudio backend
+            def audio_callback(in_data, frame_count, time_info, status):
+                if self.is_recording:
+                    # Convert to numpy array and normalize
+                    audio_chunk = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+                    self.audio_buffer.extend(audio_chunk)
+                    
+                    # Check if we have enough data for processing (5 seconds)
+                    if len(self.audio_buffer) >= int(self.sample_rate * PROCESS_CHUNK_DURATION):
+                        self._process_audio_chunk()
+                        
+                return (in_data, pyaudio.paContinue)
+            
+            self.stream = self.audio_interface.open(
+                format=pyaudio.paInt16,
+                channels=CHANNELS,
+                rate=self.sample_rate,
+                input=True,
+                frames_per_buffer=self.chunk_size,
+                stream_callback=audio_callback
+            )
+            self.stream.start_stream()
+        
+        print("Audio stream started")
+        
+    def stop_stream(self):
+        """Stop audio streaming"""
+        self.is_recording = False
+        if self.stream:
+            if self.backend == "sounddevice":
+                self.stream.stop()
+                self.stream.close()
+            else:
+                self.stream.stop_stream()
+                self.stream.close()
+                self.audio_interface.terminate()
+        print("Audio stream stopped")
+        
+    def _process_audio_chunk(self):
+        """Process audio chunk for inference"""
+        process_samples = int(self.sample_rate * PROCESS_CHUNK_DURATION)
+        overlap_samples = int(self.sample_rate * OVERLAP_DURATION)
+        
+        if len(self.processing_buffer) >= overlap_samples:
+            # Combine overlap with new data
+            overlap_data = list(self.processing_buffer)
+            new_data = list(self.audio_buffer)[-process_samples + overlap_samples:]
+            combined_data = overlap_data + new_data
+        else:
+            combined_data = list(self.audio_buffer)[-process_samples:]
+        
+        # Update processing buffer for next overlap
+        self.processing_buffer = deque(
+            list(self.audio_buffer)[-overlap_samples:], 
+            maxlen=overlap_samples
+        )
+        
+        # Check voice activity and add to queue
+        audio_array = np.array(combined_data)
+        if self._has_voice_activity(audio_array):
+            self.audio_queue.put(audio_array)
+    
+    def _has_voice_activity(self, audio_data):
+        """Simple voice activity detection"""
+        rms = np.sqrt(np.mean(audio_data**2))
+        # Normalize threshold for both backends
+        threshold = SILENCE_THRESHOLD / 32768.0
+        return rms > threshold
+    
+    def get_audio_chunk(self, timeout=1.0):
+        """Get next audio chunk for processing"""
+        try:
+            return self.audio_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
+class RealTimeSTTEngine:
+    """Real-time speech-to-text engine with Hailo acceleration"""
+    
+    def __init__(self, model_variant="base", hw_arch="hailo8", multi_process_service=False):
+        self.model_variant = model_variant
+        self.hw_arch = hw_arch
+        self.multi_process_service = multi_process_service
+        
+        # Initialize pipeline
+        self._init_pipeline()
+        self.audio_stream = None
+        self.is_running = False
+        self.processing_thread = None
+        
+    def _init_pipeline(self):
+        """Initialize Hailo Whisper pipeline"""
+        encoder_path = self._get_hef_path("encoder")
+        decoder_path = self._get_hef_path("decoder")
+        
+        self.pipeline = HailoWhisperPipeline(
+            encoder_path, 
+            decoder_path, 
+            self.model_variant,
+            multi_process_service=self.multi_process_service
+        )
+        print(f"Real-time STT engine initialized with {self.model_variant} model")
+        
+    def _get_hef_path(self, component):
+        """Get HEF file path for model component"""
+        try:
+            hef_path = HEF_REGISTRY[self.model_variant][self.hw_arch][component]
+            if not os.path.exists(hef_path):
+                raise FileNotFoundError(f"HEF file not found: {hef_path}")
+            return hef_path
+        except KeyError as e:
+            raise FileNotFoundError(
+                f"HEF not available for model '{self.model_variant}' on hardware '{self.hw_arch}'"
+            ) from e
+    
+    def start(self):
+        """Start real-time transcription"""
+        self.is_running = True
+        self.audio_stream = AudioStream()
+        self.audio_stream.start_stream()
+        
+        # Start processing thread
+        self.processing_thread = threading.Thread(target=self._processing_loop)
+        self.processing_thread.daemon = True
+        self.processing_thread.start()
+        
+        print("Real-time STT started. Speak now... (Press Ctrl+C to stop)")
+        print("Note: ALSA warnings are normal and can be ignored")
+        
+    def stop(self):
+        """Stop real-time transcription"""
+        self.is_running = False
+        if self.audio_stream:
+            self.audio_stream.stop_stream()
+        if self.processing_thread:
+            self.processing_thread.join(timeout=2.0)
+        self.pipeline.stop()
+        print("Real-time STT stopped")
+        
+    def _processing_loop(self):
+        """Main processing loop for real-time inference"""
+        while self.is_running:
+            # Get audio chunk for processing
+            audio_chunk = self.audio_stream.get_audio_chunk(timeout=0.1)
+            
+            if audio_chunk is not None:
+                try:
+                    # 检查音频长度是否正确
+                    expected_samples = int(SAMPLE_RATE * PROCESS_CHUNK_DURATION)
+                    if len(audio_chunk) != expected_samples:
+                        print(f"Warning: Audio chunk size {len(audio_chunk)} doesn't match expected {expected_samples}")
+                        # 如果长度不匹配，进行调整
+                        if len(audio_chunk) > expected_samples:
+                            audio_chunk = audio_chunk[:expected_samples]
+                        else:
+                            # 如果太短，用静音填充
+                            padding = np.zeros(expected_samples - len(audio_chunk))
+                            audio_chunk = np.concatenate([audio_chunk, padding])
+                    
+                    # Preprocess audio - 使用5秒块
+                    mel_spectrograms = preprocess(
+                        audio_chunk,
+                        is_nhwc=True,
+                        chunk_length=PROCESS_CHUNK_DURATION,  # 5秒
+                        chunk_offset=0
+                    )
+                    
+                    if not mel_spectrograms:
+                        print("Warning: No mel spectrograms generated from audio")
+                        continue
+                    
+                    # Process through pipeline
+                    for mel in mel_spectrograms:
+                        self.pipeline.send_data(mel)
+                        # 修复：不使用timeout参数，或者使用非阻塞方式
+                        try:
+                            # 尝试非阻塞获取转录
+                            transcription = self._get_transcription_non_blocking()
+                            if transcription:
+                                cleaned_text = clean_transcription(transcription)
+                                if cleaned_text.strip():
+                                    # Output with timestamp
+                                    timestamp = time.strftime("%H:%M:%S")
+                                    print(f"[{timestamp}] {cleaned_text}")
+                        except Exception as e:
+                            print(f"Transcription error: {e}")
+                                
+                except Exception as e:
+                    print(f"Processing error: {e}")
+                    
+            time.sleep(0.01)
+    
+    def _get_transcription_non_blocking(self):
+        """Non-blocking method to get transcription"""
+        # 检查管道是否有可用的转录
+        if hasattr(self.pipeline, 'transcription_available') and callable(getattr(self.pipeline, 'transcription_available')):
+            if self.pipeline.transcription_available():
+                return self.pipeline.get_transcription()
+        else:
+            # 回退方法：直接尝试获取，但可能会阻塞
+            # 在单独的线程中运行以避免阻塞
+            return self.pipeline.get_transcription()
 
 
 def get_args():
-    """
-    Initialize and run the argument parser.
-
-    Return:
-        argparse.Namespace: Parsed arguments.
-    """
-    parser = argparse.ArgumentParser(description="Whisper Hailo Pipeline")
-    parser.add_argument(
-        "--reuse-audio", 
-        action="store_true", 
-        help="Reuse the previous audio file (sampled_audio.wav)"
-    )
+    """Parse command line arguments for real-time STT"""
+    parser = argparse.ArgumentParser(description="Real-time Whisper STT with Hailo")
+    
     parser.add_argument(
         "--hw-arch",
         type=str,
         default="hailo8",
         choices=["hailo8", "hailo8l", "hailo10h"],
-        help="Hardware architecture to use (default: hailo8)"
+        help="Hardware architecture (default: hailo8)"
     )
+    
     parser.add_argument(
         "--variant",
         type=str,
         default="base",
-        choices=["base", "tiny", "tiny.en"],
-        help="Whisper variant to use (default: base)"
+        choices=["tiny", "tiny.en", "base"],
+        help="Model variant (default: base)"
     )
+    
     parser.add_argument(
         "--multi-process-service", 
         action="store_true", 
-        help="Enable multi-process service to run other models in addition to Whisper"
+        help="Enable multi-process service"
     )
+    
     return parser.parse_args()
 
 
-def get_hef_path(model_variant: str, hw_arch: str, component: str) -> str:
-    """
-    Method to retrieve HEF path.
-
-    Args:
-        model_variant (str): e.g. "tiny", "base"
-        hw_arch (str): e.g. "hailo8", "hailo8l"
-        component (str): "encoder" or "decoder"
-
-    Returns:
-        str: Absolute path to the requested HEF file.
-    """
-    try:
-        hef_path = HEF_REGISTRY[model_variant][hw_arch][component]
-    except KeyError as e:
-        raise FileNotFoundError(
-            f"HEF not available for model '{model_variant}' on hardware '{hw_arch}'."
-        ) from e
-
-    if not os.path.exists(hef_path):
-        raise FileNotFoundError(f"HEF file not found at: {hef_path}\nIf not done yet, please run python3 ./download_resources.py --hw-arch {hw_arch} from the app/ folder to download the required HEF files.")
-    return hef_path
-
-
 def main():
-    """
-    Main function to run the Hailo Whisper pipeline.
-    """
-    # Get command line arguments
+    """Main function for real-time STT application"""
     args = get_args()
-
-    variant = args.variant
-    print(f"Selected variant: Whisper {variant}")
-    encoder_path = get_hef_path(variant, args.hw_arch, "encoder")
-    decoder_path = get_hef_path(variant, args.hw_arch, "decoder")
-
-    whisper_hailo = HailoWhisperPipeline(encoder_path, decoder_path, variant, multi_process_service=args.multi_process_service)
-    print("Hailo Whisper pipeline initialized.")
-    audio_path = "sampled_audio.wav"
-    is_nhwc = True
-
-    chunk_length = 10 if "tiny" in variant else 5
-
-    while True:
-        if args.reuse_audio:
-            # Reuse the previous audio file
-            if not os.path.exists(audio_path):
-                print(f"Audio file {audio_path} not found. Please record audio first.")
-                break
-        else:
-            user_input = input("\nPress Enter to start recording, or 'q' to quit: ")
-            if user_input.lower() == "q":
-                break
-            # Record audio
-            sampled_audio = record_audio(DURATION, audio_path=audio_path)
-
-        # Process audio
-        sampled_audio = load_audio(audio_path)
-
-        sampled_audio, start_time = improve_input_audio(sampled_audio, vad=True)
-        chunk_offset = start_time - 0.2
-        if chunk_offset < 0:
-            chunk_offset = 0
-
-        mel_spectrograms = preprocess(
-            sampled_audio,
-            is_nhwc=is_nhwc,
-            chunk_length=chunk_length,
-            chunk_offset=chunk_offset
-        )
-
-        for mel in mel_spectrograms:
-            whisper_hailo.send_data(mel)
+    
+    # Initialize real-time STT engine
+    stt_engine = RealTimeSTTEngine(
+        model_variant=args.variant,
+        hw_arch=args.hw_arch,
+        multi_process_service=args.multi_process_service
+    )
+    
+    try:
+        # Start real-time transcription
+        stt_engine.start()
+        
+        # Keep running until interrupted
+        while True:
             time.sleep(0.1)
-            transcription = clean_transcription(whisper_hailo.get_transcription())
-            print(f"\n{transcription}")
-
-        if args.reuse_audio:
-            break  # Exit the loop if reusing audio
-
-    whisper_hailo.stop()
+            
+    except KeyboardInterrupt:
+        print("\nStopping real-time STT...")
+    finally:
+        stt_engine.stop()
 
 
 if __name__ == "__main__":
