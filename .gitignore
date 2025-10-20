@@ -49,3 +49,4 @@ hefs/
 # Large binary files
 *.hef
 *.npy
+*.npz
