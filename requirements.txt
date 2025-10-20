@@ -4,5 +4,3 @@ torch==2.6.0
 scipy==1.9.3
 numpy==1.24
 pyaudio==0.2.14
-
-sudo apt install portaudio19-dev python3-pyaudio

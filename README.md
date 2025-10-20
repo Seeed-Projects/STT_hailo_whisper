@@ -14,6 +14,7 @@ Ensure your system matches the following requirements before proceeding:
   sudo apt update
   sudo apt install ffmpeg
   sudo apt install libportaudio2
+  sudo apt install portaudio19-dev python3-pyaudio
   ```
 - **Python 3.10 or 3.11** installed.
 
@@ -110,6 +111,21 @@ The following command line options are available:
    streamlit run gui/gui.py -- --hw-arch hailo8l
    ```
 
+
+## Installation (Alternative uv method)
+
+For quick setup using uv package manager (as mentioned in the alternative readme), you can run:
+
+```bash
+# Install uv package manager
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment
+uv venv .env --system-site-packages
+
+# Install dependencies using uv
+uv pip install transformers torch sounddevice scipy
+```
 
 ## Additional notes
 
