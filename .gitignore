@@ -35,7 +35,4 @@ whisper_env/
 
 # model
 
-hefs/
-*.hef
-decoder_assets/
-*.npy
+hefs/**
