@@ -33,6 +33,19 @@ whisper_env/
 !.vscode/launch.json
 !.vscode/settings.json
 
-# model
+# Model files and large binary assets
+# Decoder assets
+app/decoder_assets/**/*.npy
+decoder_assets/**/*.npy
+app/decoder_assets/
+decoder_assets/
 
-hefs/**
+# Model files
+app/hefs/**/*.hef
+hefs/**/*.hef
+app/hefs/
+hefs/
+
+# Large binary files
+*.hef
+*.npy
