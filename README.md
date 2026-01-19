@@ -74,6 +74,6 @@ Follow these steps to set up the environment and install dependencies for infere
 2. Run UDP reciver
 
    ```sh
-   cd test & python recive_message.py --host 0.0.0.0 --port 12345 --stats-interval 5
+   cd test && python recive_message.py --host 0.0.0.0 --port 12345 --stats-interval 5
    ```
    You can also run `python recive_message.py --help` to check more information. 
