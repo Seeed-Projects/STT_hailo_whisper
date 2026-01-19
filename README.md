@@ -28,7 +28,7 @@ Ensure your system matches the following requirements before proceeding:
 ### [reComputer Industrial R2045-12](https://www.seeedstudio.com/reComputer-Industrial-R2045-12-p-6544.html)
 <div align='center'><img width={600} src='https://media-cdn.seeedstudio.com/media/catalog/product/cache/bb49d3ec4ee05b6f018e93f896b8a25d/1/-/1-recomputer-industrail-r2000_1.jpg'></div>
 
-## Micphone
+## Microphone Array
 
 ### [ReSpeaker Mic Array v3.0](https://www.seeedstudio.com/ReSpeaker-Mic-Array-v3-0.html)
 <div align='center'><img width={600} src='https://media-cdn.seeedstudio.com/media/catalog/product/cache/bb49d3ec4ee05b6f018e93f896b8a25d/h/t/httpsstatics3.seeedstudio.comseeedfile2018-05bazaar820383_micarrayv2.jpg'></div>
@@ -41,7 +41,6 @@ Follow these steps to set up the environment and install dependencies for infere
 
    ```sh
    https://github.com/Seeed-Projects/STT_hailo_whisper
-   STT_hailo_whisper
    ```
    If you have any authentication issues, add your SSH key or download the zip.
 
