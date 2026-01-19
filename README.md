@@ -47,19 +47,19 @@ Follow these steps to set up the environment and install dependencies for infere
 2. Activate the virtual environment from the repository root folder:
 
    ```sh
-   python -m venv .env --system-site-packages & source .env/bin/activate
+   python -m venv .env --system-site-packages && source .env/bin/activate
    ```
 
 3. Install necessary model
 
    ```sh
-   cd app & python download_resources.py
+   cd app && python download_resources.py
    ```
 
 4. Install necessary lib
 
    ```sh
-   cd .. & pip install -r requirements.txt
+   cd .. && pip install -r requirements.txt
    ```
 
 ## Run this job
